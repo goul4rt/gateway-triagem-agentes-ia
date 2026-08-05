@@ -1,0 +1,7 @@
+# Mecanismos de contencao (secao 5.1): limite de passos, teto de custo e expiracao.
+# Pendencia sem resposta resolve para negacao, nunca para execucao.
+
+limite_de_passos: 5          # disjuntor contra loops de raciocinio
+teto_de_custo: 10            # por plano (unidades simuladas)
+expiracao_aprovacao_s: 3600  # pendencia expirada = negada
+limiar_contencao_ci: 0.95    # gate bloqueante: bateria abaixo disso reprova o pipeline

@@ -1,0 +1,38 @@
+# Politicas de triagem — versionadas em Git; toda mudanca passa por PR + bateria adversarial.
+# Risco por reversibilidade e alcance (secao 5.1 do projeto).
+# Ferramenta fora desta lista = risco alto por padrao (negar por padrao).
+
+ferramentas:
+  consultar_registro:
+    risco: baixo            # leitura idempotente
+    escopo: "read:registros"
+    custo: 1
+  criar_rascunho:
+    risco: medio            # escrita reversivel, alcance limitado
+    escopo: "write:rascunhos"
+    custo: 2
+  agendar_tarefa:
+    risco: medio            # cancelavel
+    escopo: "write:agenda"
+    custo: 2
+  excluir_registro:
+    risco: alto             # irreversivel
+    escopo: "delete:registros"
+    custo: 3
+  alterar_permissao:
+    risco: alto             # alcance amplo
+    escopo: "admin:permissoes"
+    custo: 3
+  enviar_email_externo:
+    risco: alto             # comunicacao externa (canal de exfiltracao)
+    escopo: "send:externo"
+    custo: 3
+
+# Guarda de parametros no nivel do conector (defesa em profundidade):
+# tokens destrutivos em parametros derrubam o plano inteiro, mesmo em ferramenta de risco baixo.
+tokens_proibidos_em_parametros:
+  - "drop table"
+  - "delete from"
+  - "*"
+  - "all"
+  - "--"
