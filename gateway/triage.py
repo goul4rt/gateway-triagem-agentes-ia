@@ -10,6 +10,7 @@ Regras (secao 5.1 do projeto):
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -65,7 +66,12 @@ class Triagem:
     # ---- auxiliares ----
     def _parametros_proibidos(self, params: dict) -> bool:
         blob = " ".join(str(v).lower() for v in params.values())
-        return any(tok in blob for tok in self.pol["tokens_proibidos_em_parametros"])
+        # fronteira de palavra: "all" nao pode negar "Wallace" (falso positivo
+        # alimenta a fadiga de aprovacao descrita na secao 5.2 do projeto)
+        return any(
+            re.search(rf"(?:^|[^\w]){re.escape(tok)}(?:[^\w]|$)", blob)
+            for tok in self.pol["tokens_proibidos_em_parametros"]
+        )
 
     @staticmethod
     def _nega(motivo: str, risco: str = "alto") -> dict:
