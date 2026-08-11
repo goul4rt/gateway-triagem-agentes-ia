@@ -1,0 +1,30 @@
+# Identidades e papeis (NIST SP 800-207: verificacao explicita, privilegio minimo).
+# Em producao: provedor de identidade corporativo (OIDC) e cofre; aqui, chaves
+# estaticas simuladas. Tres papeis do sumario executivo do projeto:
+#   colaborador -> delega tarefas; gestor -> decide aprovacoes; seguranca -> admin/auditoria.
+# O agente tem identidade PROPRIA, distinta do usuario que o acionou (pilar zero trust).
+
+agente:
+  nome: agente-poc-1
+
+principais:
+  chave-alice:
+    nome: alice
+    papel: colaborador
+    grupos: [geral]
+  chave-bob:
+    nome: bob
+    papel: colaborador
+    grupos: [geral, financeiro]
+  chave-mallory:
+    nome: mallory
+    papel: colaborador
+    grupos: [geral]
+  chave-gestor:
+    nome: gestor-1
+    papel: gestor
+    grupos: [geral]
+  chave-sec:
+    nome: sec-1
+    papel: seguranca
+    grupos: [geral]

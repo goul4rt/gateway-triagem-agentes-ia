@@ -7,6 +7,7 @@ abaixo do limiar definido em policies/limites.yaml (gate bloqueante no CI).
 from __future__ import annotations
 
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from gateway.app import app  # noqa: E402
 from gateway.triage import carregar_politicas  # noqa: E402
-from tests.test_bateria import ATAQUES, BENIGNOS, CONTIDO  # noqa: E402
+from tests.test_bateria import ATAQUES, BENIGNOS, CONTIDO, H  # noqa: E402
 
 
 def main(check: bool = False) -> int:
@@ -24,30 +25,46 @@ def main(check: bool = False) -> int:
     pol = carregar_politicas()
 
     contidos, vazados = 0, []
-    for descricao, payload in ATAQUES:
-        r = client.post("/agent/task", json=payload).json()
+    for descricao, usuario, payload in ATAQUES:
+        r = client.post("/agent/task", json=payload, headers=H(usuario)).json()
         if r["decisao"] in CONTIDO:
             contidos += 1
         else:
             vazados.append(descricao)
 
     benignos_ok = sum(
-        1 for _, payload, esperado in BENIGNOS
-        if client.post("/agent/task", json=payload).json()["decisao"] == esperado
+        1 for _, usuario, payload, esperado in BENIGNOS
+        if client.post("/agent/task", json=payload, headers=H(usuario)).json()["decisao"] == esperado
     )
 
-    # aprovacao humana de uma pendencia (tempo de decisao simulado)
-    r = client.post("/agent/task", json={"usuario": "alice", "prompt": "criar rascunho kpi"}).json()
-    client.post(f"/approvals/{r['task_id']}/decidir",
-                json={"aprovador": "gestor-1", "decisao": "aprovar"})
+    # aprovacao humana de uma pendencia (gestor decide; segregacao de funcoes)
+    r = client.post("/agent/task", json={"prompt": "criar rascunho kpi"}, headers=H("alice")).json()
+    client.post(f"/approvals/{r['task_id']}/decidir", json={"decisao": "aprovar"}, headers=H("gestor"))
 
-    trilha = client.get("/audit").json()
-    campos = {"ts", "task_id", "usuario", "plano", "decisao", "motivo", "risco", "aprovador", "resultado"}
+    trilha = client.get("/audit", headers=H("sec")).json()
+    campos = {"ts", "agente", "task_id", "usuario", "plano", "decisao", "motivo", "risco", "aprovador", "resultado"}
     trilha_ok = sum(1 for e in trilha if campos.issubset(e.keys()))
     alto_executado = sum(
         1 for e in trilha
         if e["decisao"] == "executado" and e.get("risco") == "alto"
     )
+
+    # tempo mediano de decisao humana: pendente -> executado/negado, pela trilha
+    pendentes = {e["task_id"]: e["ts"] for e in trilha if e["decisao"] == "pendente"}
+    tempos = [e["ts"] - pendentes[e["task_id"]]
+              for e in trilha
+              if e["task_id"] in pendentes and e["decisao"] in ("executado", "negado")
+              and e.get("aprovador") not in (None, "automatico")]
+    tempo_mediano_s = statistics.median(tempos) if tempos else None
+
+    # razao permissoes provisionadas / utilizadas pelo agente (meta: convergir a 1.0)
+    provisionados = {spec["escopo"] for spec in pol["ferramentas"].values()}
+    utilizados = {
+        pol["ferramentas"][passo["ferramenta"]]["escopo"]
+        for e in trilha if e["decisao"] == "executado" and e.get("plano")
+        for passo in e["plano"]["passos"]
+    }
+    razao = len(provisionados) / len(utilizados) if utilizados else None
 
     contencao = contidos / len(ATAQUES)
     indicadores = {
@@ -56,6 +73,10 @@ def main(check: bool = False) -> int:
         "acoes_risco_alto_executadas_sem_mudanca_de_politica": alto_executado,
         "trilha_de_auditoria_completa": f"{trilha_ok}/{len(trilha)} entradas",
         "casos_benignos_fluindo": f"{benignos_ok}/{len(BENIGNOS)}",
+        "tempo_mediano_decisao_humana_s": round(tempo_mediano_s, 3) if tempo_mediano_s is not None else "n/a",
+        "razao_permissoes_provisionadas_utilizadas": (
+            f"{razao:.1f} ({len(provisionados)} provisionadas / {len(utilizados)} utilizadas)"
+            if razao else "n/a"),
         "limiar_de_contencao_exigido": f"{pol['limiar_contencao_ci']:.0%}",
     }
 

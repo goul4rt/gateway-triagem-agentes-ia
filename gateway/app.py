@@ -1,111 +1,172 @@
 """Gateway de triagem para acoes de agentes de IA — prova de conceito.
 
-Fluxo: prompt -> planejador (agente simulado) -> triagem -> executar | pendente | negar.
-Trilha de auditoria integral: pedido, plano, decisao, aprovador e resultado.
+Fluxo: prompt -> filtro ACL de documentos -> mascaramento LGPD -> planejador
+(agente simulado) -> triagem -> executar | pendente | negar -> validacao de saida.
+Trilha de auditoria integral: pedido, plano, decisao, aprovador, agente e resultado.
+
+Identidade e papeis (NIST SP 800-207): toda rota exige chave de API mapeada em
+policies/identidades.yaml; o agente age com identidade propria, registrada na
+trilha, distinta do usuario que o acionou.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+import yaml
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
-from .executor import executar_plano
+from .executor import executar_plano, valores_de_credencial
 from .planner import gerar_plano
+from .privacidade import aplicar_retencao, mascarar
 from .triage import Triagem, carregar_politicas
 
 app = FastAPI(title="Gateway de Triagem — PoC")
 
+_POL_DIR = Path(__file__).resolve().parent.parent / "policies"
 POLITICAS = carregar_politicas()
+IDENT = yaml.safe_load((_POL_DIR / "identidades.yaml").read_text(encoding="utf-8"))
+AGENTE = IDENT["agente"]["nome"]
 TRIAGEM = Triagem(POLITICAS)
-PENDENTES: dict[str, dict] = {}
+PENDENTES: dict[str, dict] = {}  # ponytail: estado em memoria, limite de laboratorio
 AUDIT_PATH = Path(__file__).resolve().parent.parent / "reports" / "trilha.jsonl"
 AUDIT_PATH.parent.mkdir(exist_ok=True)
 TRILHA: list[dict] = []
 
+# LGPD: retencao aplicada no startup (secao 5.1 do projeto)
+aplicar_retencao(AUDIT_PATH, POLITICAS["retencao_trilha_dias"])
 
+
+# ---- autenticacao e papeis ----
+def principal(x_api_key: str | None = Header(default=None)) -> dict:
+    p = IDENT["principais"].get(x_api_key or "")
+    if p is None:
+        raise HTTPException(401, "nao_autenticado")
+    return p
+
+
+def exige_papel(*papeis: str):
+    def dep(p: dict = Depends(principal)) -> dict:
+        if p["papel"] not in papeis:
+            raise HTTPException(403, f"papel_insuficiente:{p['papel']}")
+        return p
+    return dep
+
+
+# ---- auditoria ----
 def _auditar(**campos) -> dict:
-    entrada = {"ts": time.time(), **campos}
+    # mascaramento LGPD antes da gravacao: PII nao persiste em claro
+    entrada = mascarar({"ts": time.time(), "agente": AGENTE, **campos})
     TRILHA.append(entrada)
     with AUDIT_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
     return entrada
 
 
+# ---- controles de dados ----
+_ACL = re.compile(r"\[ACL:(\w+)\]")
+
+
+def _filtrar_documentos_acl(documentos: list[str], p: dict) -> tuple[list[str], int]:
+    """Preserva as permissoes de origem na recuperacao (3o caminho de ataque):
+    documento marcado [ACL:grupo] so chega ao modelo se o usuario pertence ao grupo."""
+    visiveis = []
+    for doc in documentos:
+        m = _ACL.search(doc)
+        if m and m.group(1) not in p["grupos"]:
+            continue
+        visiveis.append(doc)
+    return visiveis, len(documentos) - len(visiveis)
+
+
+def _validar_saida(resultados: list[dict]) -> list[dict]:
+    """Validacao tambem na saida (mitigacao da secao 5.2): mascara PII e redige
+    qualquer credencial do cofre que vaze para o resultado."""
+    blob = json.dumps(resultados, ensure_ascii=False)
+    for segredo in valores_de_credencial():
+        blob = blob.replace(segredo, "[CREDENCIAL_REDIGIDA]")
+    return mascarar(json.loads(blob))
+
+
+# ---- rotas ----
 class Tarefa(BaseModel):
-    usuario: str
     prompt: str
     documentos: list[str] = []
 
 
 class Decisao(BaseModel):
-    aprovador: str
     decisao: str  # "aprovar" | "negar"
 
 
 @app.post("/agent/task")
-def receber_tarefa(t: Tarefa):
-    plano = gerar_plano(t.prompt, t.documentos)
+def receber_tarefa(t: Tarefa, p: dict = Depends(exige_papel("colaborador", "gestor", "seguranca"))):
+    docs, filtrados = _filtrar_documentos_acl(t.documentos, p)
+    # mascaramento ANTES do envio ao provedor de modelo (planejador simulado)
+    plano = gerar_plano(mascarar(t.prompt), [mascarar(d) for d in docs])
     veredito = TRIAGEM.avaliar(plano)
 
     if veredito["decisao"] == "executar":
-        resultados = executar_plano(plano, POLITICAS)
-        _auditar(task_id=plano["task_id"], usuario=t.usuario, plano=plano,
+        resultados = _validar_saida(executar_plano(plano, POLITICAS))
+        _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
                  decisao="executado", motivo=veredito["motivo"], risco=veredito["risco"],
-                 aprovador="automatico", resultado=resultados)
+                 aprovador="automatico", resultado=resultados, docs_filtrados_acl=filtrados)
         return {"task_id": plano["task_id"], "decisao": "executado", "resultado": resultados}
 
     if veredito["decisao"] == "pendente":
-        PENDENTES[plano["task_id"]] = {"plano": plano, "usuario": t.usuario, "criado": time.time()}
-        _auditar(task_id=plano["task_id"], usuario=t.usuario, plano=plano,
+        PENDENTES[plano["task_id"]] = {"plano": plano, "usuario": p["nome"], "criado": time.time()}
+        _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
                  decisao="pendente", motivo=veredito["motivo"], risco=veredito["risco"],
-                 aprovador=None, resultado=None)
+                 aprovador=None, resultado=None, docs_filtrados_acl=filtrados)
         return {"task_id": plano["task_id"], "decisao": "pendente", "motivo": veredito["motivo"]}
 
-    _auditar(task_id=plano["task_id"], usuario=t.usuario, plano=plano,
+    _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
              decisao="negado", motivo=veredito["motivo"], risco=veredito["risco"],
-             aprovador="automatico", resultado=None)
+             aprovador="automatico", resultado=None, docs_filtrados_acl=filtrados)
     return {"task_id": plano["task_id"], "decisao": "negado", "motivo": veredito["motivo"]}
 
 
 @app.get("/approvals")
-def listar_pendentes():
+def listar_pendentes(p: dict = Depends(exige_papel("gestor", "seguranca"))):
     _expirar()
     return [{"task_id": k, "usuario": v["usuario"], "plano": v["plano"]} for k, v in PENDENTES.items()]
 
 
 @app.post("/approvals/{task_id}/decidir")
-def decidir(task_id: str, d: Decisao):
+def decidir(task_id: str, d: Decisao, p: dict = Depends(exige_papel("gestor", "seguranca"))):
     _expirar()
-    item = PENDENTES.pop(task_id, None)
+    item = PENDENTES.get(task_id)
     if item is None:
         raise HTTPException(404, "pendencia_inexistente_ou_expirada")
+    if item["usuario"] == p["nome"]:
+        raise HTTPException(403, "segregacao_de_funcoes:aprovador_nao_pode_ser_o_solicitante")
+    PENDENTES.pop(task_id)
     if d.decisao == "aprovar" and not TRIAGEM.kill_switch:
-        resultados = executar_plano(item["plano"], POLITICAS)
+        resultados = _validar_saida(executar_plano(item["plano"], POLITICAS))
         _auditar(task_id=task_id, usuario=item["usuario"], plano=item["plano"],
                  decisao="executado", motivo="aprovado_por_humano", risco="medio",
-                 aprovador=d.aprovador, resultado=resultados)
+                 aprovador=p["nome"], resultado=resultados)
         return {"task_id": task_id, "decisao": "executado", "resultado": resultados}
     _auditar(task_id=task_id, usuario=item["usuario"], plano=item["plano"],
              decisao="negado", motivo="negado_por_humano_ou_kill_switch", risco="medio",
-             aprovador=d.aprovador, resultado=None)
+             aprovador=p["nome"], resultado=None)
     return {"task_id": task_id, "decisao": "negado"}
 
 
 @app.post("/admin/killswitch")
-def kill_switch(ativo: bool):
+def kill_switch(ativo: bool, p: dict = Depends(exige_papel("seguranca"))):
     TRIAGEM.kill_switch = ativo
-    _auditar(task_id=str(uuid.uuid4()), usuario="admin", plano=None,
+    _auditar(task_id=str(uuid.uuid4()), usuario=p["nome"], plano=None,
              decisao="kill_switch", motivo=f"ativo={ativo}", risco="n/a",
-             aprovador="admin", resultado=None)
+             aprovador=p["nome"], resultado=None)
     return {"kill_switch": ativo}
 
 
 @app.get("/audit")
-def auditoria():
+def auditoria(p: dict = Depends(exige_papel("seguranca"))):
     return TRILHA
 
 

@@ -22,6 +22,11 @@ def obter_credencial(escopo: str) -> str:
     return _CREDENCIAIS[escopo]
 
 
+def valores_de_credencial() -> list[str]:
+    """Para a validacao de saida: nenhum segredo do cofre pode vazar no resultado."""
+    return list(_CREDENCIAIS.values())
+
+
 # ---- APIs internas simuladas (uma por nivel de risco) ----
 _REGISTROS = {"123": {"id": "123", "status": "ativo"}}
 
