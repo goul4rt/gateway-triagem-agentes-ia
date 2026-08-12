@@ -15,14 +15,14 @@ from pathlib import Path
 
 import yaml
 
-_POL = Path(__file__).resolve().parent.parent / "policies"
+POL_DIR = Path(__file__).resolve().parent.parent / "policies"
 
 ORDEM_RISCO = {"baixo": 0, "medio": 1, "alto": 2}
 
 
 def carregar_politicas() -> dict:
-    ferramentas = yaml.safe_load((_POL / "ferramentas.yaml").read_text(encoding="utf-8"))
-    limites = yaml.safe_load((_POL / "limites.yaml").read_text(encoding="utf-8"))
+    ferramentas = yaml.safe_load((POL_DIR / "ferramentas.yaml").read_text(encoding="utf-8"))
+    limites = yaml.safe_load((POL_DIR / "limites.yaml").read_text(encoding="utf-8"))
     return {**ferramentas, **limites}
 
 
@@ -66,12 +66,17 @@ class Triagem:
     # ---- auxiliares ----
     def _parametros_proibidos(self, params: dict) -> bool:
         blob = " ".join(str(v).lower() for v in params.values())
-        # fronteira de palavra: "all" nao pode negar "Wallace" (falso positivo
-        # alimenta a fadiga de aprovacao descrita na secao 5.2 do projeto)
-        return any(
-            re.search(rf"(?:^|[^\w]){re.escape(tok)}(?:[^\w]|$)", blob)
-            for tok in self.pol["tokens_proibidos_em_parametros"]
-        )
+        # fronteira de palavra so onde a borda do token e alfanumerica:
+        # "all" nao nega "Wallace" (falso positivo = fadiga de aprovacao, 5.2),
+        # mas "*" e "--" colados a texto ("123*", "x--force") continuam negados
+        return any(re.search(self._regex_token(tok), blob)
+                   for tok in self.pol["tokens_proibidos_em_parametros"])
+
+    @staticmethod
+    def _regex_token(tok: str) -> str:
+        inicio = r"(?<!\w)" if tok[0].isalnum() else ""
+        fim = r"(?!\w)" if tok[-1].isalnum() else ""
+        return inicio + re.escape(tok) + fim
 
     @staticmethod
     def _nega(motivo: str, risco: str = "alto") -> dict:

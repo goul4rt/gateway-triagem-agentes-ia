@@ -30,7 +30,7 @@ com retenção definida e PII mascarada; o agente tem identidade própria (agent
 - `policies/ferramentas.yaml` — allowlist, escopo e risco por ação (reversibilidade × alcance)
 - `policies/limites.yaml` — limite de passos, teto de custo, expiração, retenção, limiar do gate
 - `policies/identidades.yaml` — principais, papéis (colaborador/gestor/segurança) e grupos
-- `tests/test_bateria.py` — 10 ataques (must-block), identidade/segregação/LGPD/ACL, 4 benignos, 2 canários
+- `tests/test_bateria.py` — 11 ataques (must-block), identidade/segregação/LGPD/ACL, 4 benignos, 2 canários
 - `scripts/indicadores.py` — imprime os indicadores da seção 6 do projeto
 - `docs/` — [modelagem de ameaças](docs/modelagem-de-ameacas.md) ·
   [matriz de risco](docs/matriz-de-risco.md) · [playbook por cliente](docs/playbook.md) ·
@@ -40,7 +40,7 @@ com retenção definida e PII mascarada; o agente tem identidade própria (agent
 
 ```bash
 pip install -r requirements.txt
-python -m pytest tests/ -q            # bateria completa (15 testes)
+python -m pytest tests/ -q            # bateria completa (18 testes)
 python scripts/indicadores.py         # indicadores da seção 6
 uvicorn gateway.app:app --reload      # API interativa em http://localhost:8000/docs
 ```
@@ -54,7 +54,7 @@ colaborador, `chave-gestor` gestor, `chave-sec` segurança — ver
 | Indicador (seção 6 do projeto) | Resultado |
 | --- | --- |
 | Ações de agentes processadas pelo gateway | 100% (rota única, por construção) |
-| Contenção da bateria adversarial | 100% (10/10), limiar do gate: 95% |
+| Contenção da bateria adversarial | 100% (11/11), limiar do gate: 95% |
 | Ações de risco alto executadas sem mudança de política | 0 |
 | Trilha de auditoria completa | 100% das entradas |
 | Casos benignos fluindo | 4/4 |
@@ -79,9 +79,9 @@ PoC de laboratório, sem dados reais e sem LLM pago: o planejador é simulado e
 deliberadamente ingênuo porque a tese está na contenção pelo gateway, não na
 robustez do modelo. Limites declarados:
 
-- **Estado em memória**: fila de pendências e trilha viva ficam no processo; em
-  produção, armazenamento compartilhado (fila gerenciada + objeto/banco) para
-  manter a escalabilidade horizontal prometida na seção 5.1 do projeto.
+- **Estado em memória**: a fila de pendências fica no processo (a trilha é
+  arquivo, fonte única); em produção, fila gerenciada + armazenamento de objetos
+  para manter a escalabilidade horizontal prometida na seção 5.1 do projeto.
 - **Autenticação simulada**: chaves estáticas no lugar do provedor de identidade
   corporativo (OIDC) e do cofre real.
 - **Mascaramento por regex**: em produção, DLP corporativo.

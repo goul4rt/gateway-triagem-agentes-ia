@@ -57,11 +57,26 @@ def api_excluir_registro(token: str, id: str = "", **_) -> dict:
     return {"excluido": id}
 
 
+def api_alterar_permissao(token: str, usuario: str = "", nivel: str = "", **_) -> dict:
+    _exige(token, "admin:permissoes")
+    return {"permissao": {"usuario": usuario, "nivel": nivel, "estado": "alterada"}}
+
+
+def api_enviar_email_externo(token: str, para: str = "", conteudo: str = "", **_) -> dict:
+    _exige(token, "send:externo")
+    return {"email": {"para": para, "estado": "enviado"}}
+
+
+# invariante: toda ferramenta da allowlist (policies/ferramentas.yaml) tem
+# conector — um rebaixamento de risco via mudanca de politica executa em vez
+# de estourar KeyError pos-aprovacao
 _APIS = {
     "consultar_registro": api_consultar_registro,
     "criar_rascunho": api_criar_rascunho,
     "agendar_tarefa": api_agendar_tarefa,
     "excluir_registro": api_excluir_registro,
+    "alterar_permissao": api_alterar_permissao,
+    "enviar_email_externo": api_enviar_email_externo,
 }
 
 

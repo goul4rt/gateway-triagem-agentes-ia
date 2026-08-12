@@ -16,7 +16,9 @@ _PADROES = [
     (re.compile(r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b"), "[CPF]"),
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[EMAIL]"),
     (re.compile(r"\b\d{11}\b"), "[CPF]"),
-    (re.compile(r"\(\d{2}\)\s?9?\d{4}-?\d{4}\b"), "[TELEFONE]"),
+    # telefone BR com ou sem +55/parenteses/separadores; roda por ultimo, apos
+    # o padrao de 11 digitos ja ter mascarado sequencias contiguas como [CPF]
+    (re.compile(r"(?:\+55[\s.-]?)?\(?\d{2}\)?[\s.-]?9?\d{4}[\s.-]?\d{4}\b"), "[TELEFONE]"),
 ]
 
 

@@ -15,12 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from gateway.app import app  # noqa: E402
+from gateway.app import AUDIT_PATH, app  # noqa: E402
 from gateway.triage import carregar_politicas  # noqa: E402
 from tests.test_bateria import ATAQUES, BENIGNOS, CONTIDO, H  # noqa: E402
 
 
 def main(check: bool = False) -> int:
+    # medicao de laboratorio: cada execucao parte de trilha limpa
+    AUDIT_PATH.write_text("", encoding="utf-8")
     client = TestClient(app)
     pol = carregar_politicas()
 
@@ -50,11 +52,12 @@ def main(check: bool = False) -> int:
     )
 
     # tempo mediano de decisao humana: pendente -> executado/negado, pela trilha
+    # (exclui resolucoes automaticas e expiracao de TTL — so latencia de aprovador)
     pendentes = {e["task_id"]: e["ts"] for e in trilha if e["decisao"] == "pendente"}
     tempos = [e["ts"] - pendentes[e["task_id"]]
               for e in trilha
               if e["task_id"] in pendentes and e["decisao"] in ("executado", "negado")
-              and e.get("aprovador") not in (None, "automatico")]
+              and e.get("aprovador") not in (None, "automatico", "expiracao")]
     tempo_mediano_s = statistics.median(tempos) if tempos else None
 
     # razao permissoes provisionadas / utilizadas pelo agente (meta: convergir a 1.0)

@@ -23,19 +23,17 @@ from pydantic import BaseModel
 from .executor import executar_plano, valores_de_credencial
 from .planner import gerar_plano
 from .privacidade import aplicar_retencao, mascarar
-from .triage import Triagem, carregar_politicas
+from .triage import POL_DIR, Triagem, carregar_politicas
 
 app = FastAPI(title="Gateway de Triagem — PoC")
 
-_POL_DIR = Path(__file__).resolve().parent.parent / "policies"
 POLITICAS = carregar_politicas()
-IDENT = yaml.safe_load((_POL_DIR / "identidades.yaml").read_text(encoding="utf-8"))
+IDENT = yaml.safe_load((POL_DIR / "identidades.yaml").read_text(encoding="utf-8"))
 AGENTE = IDENT["agente"]["nome"]
 TRIAGEM = Triagem(POLITICAS)
 PENDENTES: dict[str, dict] = {}  # ponytail: estado em memoria, limite de laboratorio
 AUDIT_PATH = Path(__file__).resolve().parent.parent / "reports" / "trilha.jsonl"
 AUDIT_PATH.parent.mkdir(exist_ok=True)
-TRILHA: list[dict] = []
 
 # LGPD: retencao aplicada no startup (secao 5.1 do projeto)
 aplicar_retencao(AUDIT_PATH, POLITICAS["retencao_trilha_dias"])
@@ -58,13 +56,19 @@ def exige_papel(*papeis: str):
 
 
 # ---- auditoria ----
+# fonte unica: o arquivo (a copia em memoria duplicava a trilha e ignorava a retencao)
 def _auditar(**campos) -> dict:
     # mascaramento LGPD antes da gravacao: PII nao persiste em claro
     entrada = mascarar({"ts": time.time(), "agente": AGENTE, **campos})
-    TRILHA.append(entrada)
     with AUDIT_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entrada, ensure_ascii=False) + "\n")
     return entrada
+
+
+def _ler_trilha() -> list[dict]:
+    if not AUDIT_PATH.exists():
+        return []
+    return [json.loads(l) for l in AUDIT_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
 # ---- controles de dados ----
@@ -73,11 +77,11 @@ _ACL = re.compile(r"\[ACL:(\w+)\]")
 
 def _filtrar_documentos_acl(documentos: list[str], p: dict) -> tuple[list[str], int]:
     """Preserva as permissoes de origem na recuperacao (3o caminho de ataque):
-    documento marcado [ACL:grupo] so chega ao modelo se o usuario pertence ao grupo."""
+    documento marcado [ACL:grupo] so chega ao modelo se o usuario pertence a
+    TODOS os grupos marcados — com varias tags, a mais restritiva vence."""
     visiveis = []
     for doc in documentos:
-        m = _ACL.search(doc)
-        if m and m.group(1) not in p["grupos"]:
+        if any(g not in p["grupos"] for g in _ACL.findall(doc)):
             continue
         visiveis.append(doc)
     return visiveis, len(documentos) - len(visiveis)
@@ -109,23 +113,20 @@ def receber_tarefa(t: Tarefa, p: dict = Depends(exige_papel("colaborador", "gest
     plano = gerar_plano(mascarar(t.prompt), [mascarar(d) for d in docs])
     veredito = TRIAGEM.avaliar(plano)
 
+    base = dict(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
+                motivo=veredito["motivo"], risco=veredito["risco"], docs_filtrados_acl=filtrados)
+
     if veredito["decisao"] == "executar":
         resultados = _validar_saida(executar_plano(plano, POLITICAS))
-        _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
-                 decisao="executado", motivo=veredito["motivo"], risco=veredito["risco"],
-                 aprovador="automatico", resultado=resultados, docs_filtrados_acl=filtrados)
+        _auditar(**base, decisao="executado", aprovador="automatico", resultado=resultados)
         return {"task_id": plano["task_id"], "decisao": "executado", "resultado": resultados}
 
     if veredito["decisao"] == "pendente":
         PENDENTES[plano["task_id"]] = {"plano": plano, "usuario": p["nome"], "criado": time.time()}
-        _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
-                 decisao="pendente", motivo=veredito["motivo"], risco=veredito["risco"],
-                 aprovador=None, resultado=None, docs_filtrados_acl=filtrados)
+        _auditar(**base, decisao="pendente", aprovador=None, resultado=None)
         return {"task_id": plano["task_id"], "decisao": "pendente", "motivo": veredito["motivo"]}
 
-    _auditar(task_id=plano["task_id"], usuario=p["nome"], pedido=t.prompt, plano=plano,
-             decisao="negado", motivo=veredito["motivo"], risco=veredito["risco"],
-             aprovador="automatico", resultado=None, docs_filtrados_acl=filtrados)
+    _auditar(**base, decisao="negado", aprovador="automatico", resultado=None)
     return {"task_id": plano["task_id"], "decisao": "negado", "motivo": veredito["motivo"]}
 
 
@@ -144,15 +145,13 @@ def decidir(task_id: str, d: Decisao, p: dict = Depends(exige_papel("gestor", "s
     if item["usuario"] == p["nome"]:
         raise HTTPException(403, "segregacao_de_funcoes:aprovador_nao_pode_ser_o_solicitante")
     PENDENTES.pop(task_id)
+    base = dict(task_id=task_id, usuario=item["usuario"], plano=item["plano"],
+                risco="medio", aprovador=p["nome"])
     if d.decisao == "aprovar" and not TRIAGEM.kill_switch:
         resultados = _validar_saida(executar_plano(item["plano"], POLITICAS))
-        _auditar(task_id=task_id, usuario=item["usuario"], plano=item["plano"],
-                 decisao="executado", motivo="aprovado_por_humano", risco="medio",
-                 aprovador=p["nome"], resultado=resultados)
+        _auditar(**base, decisao="executado", motivo="aprovado_por_humano", resultado=resultados)
         return {"task_id": task_id, "decisao": "executado", "resultado": resultados}
-    _auditar(task_id=task_id, usuario=item["usuario"], plano=item["plano"],
-             decisao="negado", motivo="negado_por_humano_ou_kill_switch", risco="medio",
-             aprovador=p["nome"], resultado=None)
+    _auditar(**base, decisao="negado", motivo="negado_por_humano_ou_kill_switch", resultado=None)
     return {"task_id": task_id, "decisao": "negado"}
 
 
@@ -167,7 +166,7 @@ def kill_switch(ativo: bool, p: dict = Depends(exige_papel("seguranca"))):
 
 @app.get("/audit")
 def auditoria(p: dict = Depends(exige_papel("seguranca"))):
-    return TRILHA
+    return _ler_trilha()
 
 
 def _expirar():

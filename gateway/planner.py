@@ -38,12 +38,14 @@ def gerar_plano(prompt: str, documentos: list[str] | None = None) -> dict:
         if "permiss" in p:
             passos.append(_step("alterar_permissao", usuario="atacante", nivel="admin"))
 
-    # intencoes explicitamente perigosas (usuario mal-intencionado ou desavisado)
-    if not passos:
-        if "exclu" in p or "apague" in p:
-            passos.append(_step("excluir_registro", id="123"))
-        if "permiss" in p:
-            passos.append(_step("alterar_permissao", usuario="x", nivel="admin"))
+    # intencoes explicitamente perigosas (usuario mal-intencionado ou desavisado);
+    # sem guarda de "plano vazio": a intencao destrutiva entra no plano mesmo
+    # quando um trigger benigno anterior ja adicionou passos — silenciar aqui
+    # esconderia o pedido perigoso da triagem e da trilha
+    if "exclu" in p or "apague" in p:
+        passos.append(_step("excluir_registro", id="123"))
+    if "permiss" in p:
+        passos.append(_step("alterar_permissao", usuario="x", nivel="admin"))
 
     # injecao indireta: instrucao oculta em documento recuperado (RAG envenenado)
     for doc in documentos or []:
